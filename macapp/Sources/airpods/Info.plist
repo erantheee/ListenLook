@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleExecutable</key>
+	<string>airpods</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.listenlook.airpods</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ListenLook AirPods Source</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSUIElement</key>
+	<true/>
+
+	<!-- ═══════════════════════════════════════════════════════════════════
+	     NSMotionUsageDescription —— 这一条是**整个 bundle 存在的理由**。
+
+	     实测：没有它的时候 CoreMotion 不会返回错误、不会弹窗，
+	     而是把进程直接打死（__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__），
+	     崩溃报告里只有一行 responsibleProc 线索。
+	     也就是说：**裸 CLI 二进制在原理上就拿不到运动权限**，
+	     必须打成 .app bundle、带这条说明、并被签名，TCC 才认。
+
+	     文案必须说清楚"为什么" —— 用户在权限窗里看到的就是这句话，
+	     而且这条权限直接读取"头部朝向"这种身体动作数据，属于敏感信息。
+	     所以明说：只读朝向、只在内存里、不记录轨迹、不落盘、不联网上传
+	     （数据只在局域网里发给用户自己的接收端）。
+	     ═══════════════════════════════════════════════════════════════════ -->
+	<key>NSMotionUsageDescription</key>
+	<string>用于读取 AirPods 的头部朝向（偏航/俯仰/翻滚），把它转换成鼠标移动，让你能用头玩射击游戏。姿态数据只在内存中实时处理，不记录运动轨迹、不落盘、不上传；仅通过本机 UDP 端口发给由你自己启动的接收端。此权限仅涉及运动与健身数据，不涉及麦克风、摄像头或位置。 / Reads AirPods head attitude (yaw/pitch/roll) to drive mouse movement so you can play games with your head. Attitude is processed in memory only — no motion history is recorded, stored, or uploaded; it is sent over UDP only to the receiver you run yourself. This is Motion &amp; Fitness data only: no microphone, camera, or location access.</string>
+
+	<!-- ⚠️ 刻意**没有** NSMicrophoneUsageDescription / NSCameraUsageDescription。
+	     本程序是纯输入端：不录音、不拍照、不发声。声明了反而会让系统以为它会申请这些权限。 -->
+</dict>
+</plist>

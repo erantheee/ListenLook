@@ -123,6 +123,9 @@ def load_config(path: Optional[str]) -> Config:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
     for k, v in raw.items():
+        if k.startswith("_"):
+            # 下划线开头 = 配置文件里的注释（JSON 不支持注释，这是通行的替代写法）
+            continue
         if not hasattr(cfg, k):
             print(f"警告：配置里有未知字段 '{k}'，已忽略", file=sys.stderr)
             continue
@@ -300,6 +303,15 @@ class MouseBackend:
     def screen_union(self) -> Optional[tuple[float, float, float, float]]:
         """所有显示器合并后的边界 (x, y, w, h)。"""
         return None
+
+    def key_down(self, key: str) -> bool:
+        """按键当前是否按下。平台后端按需覆写；不支持的后端返回 False
+        （例如 Linux/uinput 只写不读、dry-run 不碰系统）——
+        关键是**不能因为没实现就让 --activation hold 崩掉**。"""
+        return False
+
+    def button_down(self, button: str) -> bool:
+        return False
 
     def permission_ok(self) -> tuple[bool, str]:
         return True, ""

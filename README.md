@@ -52,14 +52,25 @@ AirPods，不需要额外硬件，不需要改装。
 ### A. macOS + AirPods（最省事的一条）
 
 ```bash
-# 终端 1：采集端（AirPods → UDP）
-cd macapp && ./run.sh
+cd macapp
+./build.sh          # 编译 + 打包 .app（不需要 Xcode）
 
-# 终端 2：接收端（UDP → 鼠标）
-python3 receiver/listenlook.py
+# ⚠️ 第一次必须让采集端"自己"去要权限，否则会被系统直接打死（不报错、不弹窗）：
+open -n Out/airpods.app        # 或直接在访达里双击 Out/airpods.app，然后点「允许」
+pkill -f "MacOS/airpods"       # 授权完成后先关掉它
+
+# 之后就可以正常在终端里跑：
+./run.sh &                     # 采集端：AirPods 姿态 → UDP
+python3 ../receiver/listenlook.py   # 接收端：UDP → 鼠标
 ```
 
-第一次运行需要给**辅助功能**权限（见下面"权限"一节）。授权前也能跑，但只是降级模式。
+**为什么第一次不能直接在终端里跑**：macOS 把权限算在**责任进程**头上。
+在终端/IDE 里 exec 这个二进制时，责任进程是那个宿主，而宿主没有
+`NSMotionUsageDescription`，于是权限请求不是"被拒"而是**违反隐私策略直接 abort**。
+双击 `Out/airpods.app` 时本程序自己是责任进程，弹窗才会正常出现。
+详见 [macapp/README.md](macapp/README.md)。
+
+接收端还需要**辅助功能**权限（见下面"权限"一节）；授权前也能跑，但只是降级模式。
 
 ### B. Windows / Linux（手机当传感器）
 
@@ -118,9 +129,12 @@ python3 tests/fake_phone.py --seconds 5      # 用合成数据冒充手机
 
 ## 权限
 
-### macOS：辅助功能（必须，没有捷径）
+### macOS：两个权限，两个不同的坑
 
-在同一台 Mac 上用 AirPods 直连时，采集端需要**运动与健身**权限，接收端需要**辅助功能**权限。
+| 程序 | 需要的权限 | 关键点 |
+|---|---|---|
+| `macapp`（采集端） | 运动与健身 | 必须先双击 `.app` 让**它自己**弹窗；在别的宿主里跑会被 TCC 直接打死 |
+| `receiver`（接收端） | 辅助功能 | 授权后必须**重启程序**，macOS 不给运行中的进程补发权限 |
 
 没有辅助功能权限时，ListenLook 会**自动降级到 CGWarp 模式**并明确告诉你：
 光标会动，但**不产生鼠标移动事件，游戏里不会有反应**。这是实测结论，不是保险起见 ——
