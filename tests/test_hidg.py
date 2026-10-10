@@ -114,6 +114,36 @@ def test_zero_move_writes_nothing() -> None:
     check("没有写出任何字节", len(data) == 0, f"{len(data)} 字节")
 
 
+
+
+def test_windows_absolute_conversion() -> None:
+    print("\n[6] Windows 绝对坐标换算（像素 → 0..65535 归一化）")
+    # 这一段在 macOS 上永远跑不到（Darwin 后端不用它），但它就是
+    # Windows 绝对模式的全部逻辑 —— 而且曾经因为它，绝对模式在 Windows 上完全错位。
+    conv = ll.WindowsMouse.to_normalized
+
+    # 单显示器 1920x1080 放在原点
+    bbox = (0.0, 0.0, 1920.0, 1080.0)
+    check("左上角 → (0,0)", conv(0, 0, bbox) == (0, 0), str(conv(0, 0, bbox)))
+    check("右下角 → 满量程", conv(1920, 1080, bbox) == (65535, 65535), str(conv(1920, 1080, bbox)))
+    cx, cy = conv(960, 540, bbox)
+    check("屏幕中心 ≈ 半量程", abs(cx - 32767) < 2 and abs(cy - 32767) < 2, f"{cx},{cy}")
+    check("超出边界被钳制", conv(-500, 5000, bbox)[0] == 0 and conv(-500, 5000, bbox)[1] == 65535)
+
+    # 多显示器：副屏在主屏**左侧**，所以包围盒左边界是负的。
+    # 这正是旧实现错的地方 —— 它把"左边界"当成 0，于是副屏上的目标全被钳到主屏左缘。
+    wide = (-1920.0, 0.0, 1920.0, 1080.0)
+    left_half, _ = conv(-960, 540, wide)
+    check("副屏（负坐标）能定位到左半区", 16000 < left_half < 17000, f"{left_half}")
+    check("主屏右缘 → 满量程", conv(1920, 540, wide)[0] == 65535)
+
+
+def test_absolute_capability() -> None:
+    print("\n[7] 后端能力声明（绝对模式必须能被明确拒绝，而不是运行时崩）")
+    check("HID gadget 声明不支持绝对定位", ll.HidgMouse.supports_absolute is False)
+    check("本机注入后端支持绝对定位", ll.DryRunMouse.supports_absolute is True)
+
+
 def main() -> int:
     print("ListenLook HID gadget 报文测试")
     test_single_report()
@@ -121,6 +151,8 @@ def main() -> int:
     test_scroll()
     test_stats()
     test_zero_move_writes_nothing()
+    test_windows_absolute_conversion()
+    test_absolute_capability()
     print(f"\n{'=' * 58}\n通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     if FAIL:
         for f in FAIL:

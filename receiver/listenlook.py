@@ -320,8 +320,18 @@ class MouseBackend:
         return None
 
     def screen_union(self) -> Optional[tuple[float, float, float, float]]:
-        """所有显示器合并后的边界 (x, y, w, h)。"""
+        """所有显示器合并后的**包围盒**，单位像素，约定为 (左, 上, 右, 下)。
+
+        ⚠️ 这里曾经是两个后端各说各话：macOS 返回包围盒、Windows 返回 (x,y,w,h)，
+        而 move_absolute 一边收像素、一边收归一化 0..1。结果：
+          · 绝对模式在 Windows 上完全错位（送进去的像素被当成 0..1 钳成了满屏）
+          · 多显示器错位摆放时 macOS 的绝对模式也会算错
+        契约必须只有一份，写在基类这里，由各后端遵守。
+        """
         return None
+
+    #: 该后端是否支持绝对定位（USB HID gadget 是相对设备，不支持）
+    supports_absolute = True
 
     def key_press(self, key: str) -> bool:
         """按下一个键（按下即松开由调用方分两步做，见 key_release）。
@@ -483,7 +493,7 @@ class DarwinMouse(MouseBackend):
             self.cg.CGWarpMouseCursorPosition(CGPoint(x, y))
 
     def _clamp(self, x: float, y: float) -> tuple[float, float]:
-        b = self.screen_union()
+        b = self.screen_union()   # (左, 上, 右, 下)
         if not b:
             return x, y
         # 钳制到所有显示器的并集。多屏时这个并集是矩形，可能包含显示器之间的空隙，
@@ -573,10 +583,26 @@ class WindowsMouse(MouseBackend):
         # SendInput 只吃整数，小数部分由上层累积器处理（见 Mapper）
         self._send(self.MOUSEEVENTF_MOVE, int(dx), int(dy))
 
+    @staticmethod
+    def to_normalized(x: float, y: float,
+                      bbox: Optional[tuple[float, float, float, float]]) -> tuple[int, int]:
+        """像素坐标 → SendInput 要的 0..65535 归一化绝对坐标。
+
+        抽成静态方法是为了能单独测：这段换算在 macOS 上跑不到（Darwin 后端不用它），
+        但它恰恰是 Windows 绝对模式的全部逻辑。
+        """
+        if bbox:
+            left, top, right, bottom = bbox
+        else:
+            left, top, right, bottom = 0.0, 0.0, 1.0, 1.0
+        w = max(right - left, 1.0)
+        h = max(bottom - top, 1.0)
+        nx = max(0.0, min(1.0, (x - left) / w))
+        ny = max(0.0, min(1.0, (y - top) / h))
+        return int(nx * 65535), int(ny * 65535)
+
     def move_absolute(self, x: float, y: float) -> None:
-        # 绝对模式用 0..65535 归一化坐标
-        vx = int(max(0.0, min(1.0, x)) * 65535)
-        vy = int(max(0.0, min(1.0, y)) * 65535)
+        vx, vy = self.to_normalized(x, y, self.screen_union())
         self._send(self.MOUSEEVENTF_MOVE | 0x8000 | 0x4000, vx, vy)
 
     def scroll(self, notches: int) -> None:
@@ -592,12 +618,12 @@ class WindowsMouse(MouseBackend):
     def screen_union(self) -> Optional[tuple[float, float, float, float]]:
         try:
             gsm = self.user32.GetSystemMetrics
-            return (
-                float(gsm(76)),  # SM_XVIRTUALSCREEN
-                float(gsm(77)),  # SM_YVIRTUALSCREEN
-                float(gsm(78)),  # SM_CXVIRTUALSCREEN
-                float(gsm(79)),  # SM_CYVIRTUALSCREEN
-            )
+            left = float(gsm(76))   # SM_XVIRTUALSCREEN
+            top = float(gsm(77))    # SM_YVIRTUALSCREEN
+            width = float(gsm(78))  # SM_CXVIRTUALSCREEN
+            height = float(gsm(79))  # SM_CYVIRTUALSCREEN
+            # 返回包围盒 (左, 上, 右, 下)，不是 (x, y, w, h) —— 见基类契约
+            return (left, top, left + width, top + height)
         except Exception:
             return None
 
@@ -779,6 +805,7 @@ class HidgMouse(MouseBackend):
     """
 
     name = "linux/USB-HID-gadget"
+    supports_absolute = False   # boot 协议鼠标是相对设备
 
     def __init__(self, path: str = "/dev/hidg0") -> None:
         self.path = path
@@ -2089,6 +2116,12 @@ def hold_key_down(mouse: MouseBackend, key: str) -> bool:
 
 
 def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Event) -> None:
+    if cfg.mode == "absolute" and not mouse.supports_absolute:
+        # 与其在运行中抛 NotImplementedError，不如启动就说清楚
+        raise SystemExit(
+            f"⚠️  {mouse.name} 不支持绝对定位（它只能发相对位移）。\n"
+            "    绝对模式请用 --output auto（本机注入），或改用 --mode relative / rate。"
+        )
     mapper = Mapper(cfg)
     panel = Panel(cfg, mouse, on=(cfg.activation == "always"))
     dt_target = 1.0 / max(1, cfg.rate_hz)
@@ -2186,8 +2219,10 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
         if held:
             if cfg.mode == "absolute":
                 b = mouse.screen_union() or (0.0, 0.0, 1.0, 1.0)
-                # dx/dy 这里是 -1..1 的归一化位置
-                mouse.move_absolute(b[0] + (dx + 1) * 0.5 * b[2], b[1] + (dy + 1) * 0.5 * b[3])
+                # 包围盒要按**宽高**用，不是把右/下当宽高 —— 多显示器错位摆放时两者不等
+                width, height = b[2] - b[0], b[3] - b[1]
+                mouse.move_absolute(b[0] + (dx + 1) * 0.5 * width,
+                                    b[1] + (dy + 1) * 0.5 * height)
                 dx = dy = 0.0
             elif dx or dy:
                 if cfg.mouse_scale and cfg.mouse_scale != 1.0:
