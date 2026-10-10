@@ -779,10 +779,15 @@ class HidgMouse(MouseBackend):
 
     def __init__(self, path: str = "/dev/hidg0") -> None:
         self.path = path
-        # O_NONBLOCK 在 Windows 上**根本不存在**（这个后端本来只跑 Linux，
-        # 但测试会用普通文件冒充设备节点，那样在任何平台都该能跑）。
-        # 这是 CI 在 windows-latest 上抓到的：AttributeError: module 'os' has no attribute 'O_NONBLOCK'
-        self.fd = os.open(path, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+        # 两个标志都必须显式给，两个都是 CI 在 windows-latest 上抓出来的：
+        #   · O_NONBLOCK 在 Windows 上根本不存在 → AttributeError
+        #   · Windows 的 os.open **默认是文本模式**，会把报文里的 0x0A 翻译成 0x0D 0x0A。
+        #     一个 4 字节 HID 报文会变成 5 字节，后面全部错位 —— 表现是
+        #     "某些方向的移动会让鼠标乱跳"。二进制协议必须显式 O_BINARY。
+        #     （目标是 Linux 时不存在这个问题，但这类字节级污染一旦发生就是灾难性的，
+        #      而且极难从现象反推，所以标志位要写全。）
+        flags = os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        self.fd = os.open(path, flags)
         self.reports = 0
         self.px = 0.0
         self.py = 0.0
