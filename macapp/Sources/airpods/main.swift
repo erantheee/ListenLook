@@ -42,6 +42,11 @@ struct Options {
     var debugRaw = false  // LL_DEBUG_RAW=1，面板上显示 CoreMotion 原始值
     var outPath: String?  // 把 JSON 行写进文件而不是 stdout
     var seconds = 0       // >0 时跑够这么多秒自动退出（自检/脚本用）
+    /// 演示/自检模式：**完全不碰 CoreMotion**，用合成姿态驱动面板与发送端。
+    /// 存在的理由有两个，都不是好玩：
+    ///   1. 面板与协议链路可以在任何机器上验证（CI 里没有 AirPods，也可能没有运动权限）；
+    ///   2. 没有 AirPods 的人也能先看清这个工具长什么样、会发什么数据。
+    var demo = false
 }
 
 let usage = """
@@ -61,6 +66,7 @@ ListenLook —— AirPods 头部姿态传感器端（macOS）
   --hz <n>        发送速率上限，默认 0 = 不额外限速（跟随 CoreMotion 回调）
   --out <path>    把 JSON 行写进文件（便于用 open 启动时留证据）
   --seconds <n>   跑够 n 秒自动退出，默认 0 = 一直跑（自检/脚本用）
+  --demo          演示模式：发合成姿态，**不读取任何真实传感器、不需要权限**
   -h, --help      显示这段帮助
   -v, --version   显示版本
 
@@ -117,6 +123,7 @@ func parseArgs(_ argv: [String]) -> (Options?, Int32) {
             } else {
                 o.hz = n
             }
+        case "--demo": o.demo = true
         case "--quiet": o.quiet = true
         case "--json": o.json = true
         case "--out":
@@ -226,9 +233,17 @@ final class App {
             self?.emit(reading, unavailable: false)
         }
 
-        let result = tracker.start()
-        if result != .ok, mode != .quiet {
-            err("[listenlook] \(tracker.statusMessage)")
+        if opts.demo {
+            // 演示模式刻意**不调用** tracker.start()：它一碰 CoreMotion 就会走 TCC，
+            // 而在没有权限的宿主里那一步会直接打死进程。面板验证不需要真传感器。
+            if mode != .quiet {
+                err("[listenlook] 演示模式：发送合成姿态，未读取任何真实传感器")
+            }
+        } else {
+            let result = tracker.start()
+            if result != .ok, mode != .quiet {
+                err("[listenlook] \(tracker.statusMessage)")
+            }
         }
 
         if mode == .panel {
@@ -294,13 +309,33 @@ final class App {
 
     private func tick() {
         let now = Date().timeIntervalSince1970
-        let reading = tracker.reading
+        let reading: PoseReading
+        if opts.demo {
+            // 合成一个缓慢画 8 字的姿态：三条轴同时动，便于肉眼确认面板三根条都在工作
+            let t = now - startedAt
+            var r = PoseReading()
+            r.yawDeg = 18.0 * sin(t * 0.7)
+            r.pitchDeg = 12.0 * sin(t * 1.1 + 0.6)
+            r.rollDeg = 6.0 * sin(t * 0.35)
+            r.available = true
+            r.deviceName = "合成姿态（--demo，非实测）"
+            reading = r
+        } else {
+            reading = tracker.reading
+        }
 
         // ── 心跳 / 陈旧数据兜底 ──
         // 采样回调停了（AirPods 摘了、没连、没权限）也要继续说话：
         // 静默是最糟的行为 —— 接收端会分不清"玩家没动"和"传感器挂了"。
         // 节流到 4 Hz（协议上限）。tick 是 8 Hz，不节流会发成 8 Hz。
-        if now - lastSampleAt >= 0.25, now - lastHeartbeatAt >= 0.25 {
+        if opts.demo {
+            // 演示模式没有 CoreMotion 回调，样本由 tick 自己产生（8Hz）。
+            // 必须先更新 lastSampleAt —— 否则下面那段"陈旧数据兜底"会认为采样停了，
+            // 按协议把角度清零成 ok:false，于是演示模式发出去的全是零。
+            lastSampleAt = now
+            sampleWindow.append(now)
+            emit(reading, unavailable: false)
+        } else if now - lastSampleAt >= 0.25, now - lastHeartbeatAt >= 0.25 {
             lastHeartbeatAt = now
             let stale = now - lastSampleAt >= kStaleAfter
             var r = reading
@@ -343,7 +378,9 @@ final class App {
             var st = Panel.Status()
             st.target = "\(opts.host):\(opts.port)"
             st.authText = authText
-            st.statusText = tracker.statusMessage
+            st.statusText = opts.demo
+                ? "演示模式（--demo）：合成姿态，未读取任何真实传感器"
+                : tracker.statusMessage
             st.healthy = reading.available
             st.deviceName = reading.deviceName
             st.seq = sender.seq

@@ -86,6 +86,31 @@ jobs:
       - name: 冒烟测试（能打印帮助即说明二进制可加载）
         run: macapp/Out/airpods.app/Contents/MacOS/airpods --help | head -5
 
+      - name: 冒烟测试（--demo 必须发出有效姿态帧）
+        run: |
+          cd macapp
+          # --demo 用合成姿态，不碰 CoreMotion、不需要运动权限 ——
+          # CI runner 上既没有 AirPods，权限也无从授予，这是唯一能验证发送链路的方式。
+          ./Out/airpods.app/Contents/MacOS/airpods --demo --json --seconds 2 > poses.jsonl 2>/dev/null
+          cat poses.jsonl
+          grep -q '"ok":true' poses.jsonl || { echo "::error::--demo 没有发出有效帧（ok:true）"; exit 1; }
+          if grep -q '"yaw":0.0000,"pitch":0.0000,"roll":0.0000,"ok":true' poses.jsonl; then
+            echo "::error::--demo 发出的角度恒为零 —— 合成样本没有接到发送路径上"
+            exit 1
+          fi
+
+      - name: 冒烟测试（面板必须在 PTY 下真的画出来）
+        run: |
+          cd macapp
+          # 面板的守门逻辑是"stdout 不是终端就不画"，所以必须开一个 PTY 才能验证它。
+          # 这台 runner 是唯一能同时满足"有 PTY + 能编译"的地方。
+          script -q /dev/null ./Out/airpods.app/Contents/MacOS/airpods --demo --seconds 2 > panel.txt 2>&1 || true
+          grep -q "ListenLook" panel.txt || { echo "::error::面板没有标题"; cat panel.txt; exit 1; }
+          grep -q "yaw"       panel.txt || { echo "::error::面板没有 yaw 轴"; cat panel.txt; exit 1; }
+          grep -q "█"         panel.txt || { echo "::error::面板没有条形图（退化成一行日志了）"; cat panel.txt; exit 1; }
+          echo "✅ 面板渲染正常"
+          head -12 panel.txt
+
       - uses: actions/upload-artifact@v4
         with:
           name: ListenLook-airpods-macos
