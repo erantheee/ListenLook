@@ -173,8 +173,9 @@ sudo modprobe uinput && sudo usermod -aG input $USER   # 重新登录后生效
 ## 已知边界（诚实清单）
 
 - **游戏里的原始输入**：Windows 的 `SendInput` 对绝大多数游戏有效，但少数读原始 HID
-  的竞技类游戏可能忽略合成事件。彻底的解法是虚拟 HID 驱动（vJoy / Interception）
-  或硬件级注入 —— 那是另一个工程量级，本仓库没做。
+  的竞技类游戏可能忽略合成事件。**解法已经有了**：把接收端跑在树莓派上、用
+  `--output hidg` 让树莓派**装成一个真 USB 鼠标**，电脑端零软件、所有游戏都认。
+  见 [docs/usb-hid-bridge.md](docs/usb-hid-bridge.md)。
 - **yaw 会漂**：只用加速度计+陀螺仪时，yaw 没有绝对参考（要磁力计），会缓慢漂移。
   对"转头控制光标"没影响（我们要的就是相对转动量），按一下归零即可。别当 AHRS 用。
 - **手机浏览器读不到数据**：先确认页面是 `https://` 打开的。HTTP 下浏览器不给陀螺仪数据，
@@ -223,6 +224,9 @@ tests/                    管线测试、解析器测试、假手机
 
 - [x] Windows 单文件 exe —— CI 产出（GitHub Actions 的 `windows-exe` 任务），不用装 Python
 - [x] 手势映射：点头/摇头 → 按键（**默认关闭**，`gestures` 配了才生效）
+- [x] USB HID 桥：树莓派 `--output hidg` 装成真鼠标，电脑端零软件、raw input 游戏也认
+      （[docs/usb-hid-bridge.md](docs/usb-hid-bridge.md)）
+- [ ] 在真树莓派上实测 HID gadget 后端（代码与报文编码已测，缺硬件验证）
 - [ ] 全局热键（Windows `RegisterHotKey` / macOS CGEventTap），现在是按住键轮询
 - [ ] Linux 桥的一键安装脚本（BlueZ 那条路）
 - [ ] 把 `--activation hold` 的默认键做成可发现（面板提示当前用哪个键）

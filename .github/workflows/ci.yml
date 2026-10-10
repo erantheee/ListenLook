@@ -48,6 +48,9 @@ jobs:
       - name: 打包后的路径逻辑
         run: python tests/test_frozen.py
 
+      - name: USB HID gadget 报文编码
+        run: python tests/test_hidg.py
+
       - name: 管线（UDP / FreePIE / 掉线停手 / 滚轮 / 坏帧）
         run: python tests/test_pipeline.py
 

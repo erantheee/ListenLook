@@ -107,7 +107,8 @@ class Config:
     hold_key: str = "f8"  # 见 KEYCODES；也接受 right_mouse / left_mouse
 
     # 其它
-    output: str = "auto"  # auto | dry
+    output: str = "auto"  # auto | dry | hidg（hidg = Linux USB HID gadget，PC 端零软件）
+    hidg_device: str = "/dev/hidg0"
     panel: bool = True
     stats: float = 0.0  # >0 时：每 N 秒往 stdout 打一行 JSON 统计（给脚本/CI 用）
     auto_recenter_idle_s: float = 0.0  # >0 时：静止这么久就把当前朝向当新零点
@@ -335,6 +336,10 @@ class MouseBackend:
 
     def button_down(self, button: str) -> bool:
         return False
+
+    def stats(self) -> dict:
+        """后端自己的运行统计，会被并进 --stats 的 JSON 行。默认没有。"""
+        return {}
 
     def permission_ok(self) -> tuple[bool, str]:
         return True, ""
@@ -749,6 +754,74 @@ class LinuxMouse(MouseBackend):
                 pass
 
 
+class HidgMouse(MouseBackend):
+    """Linux USB HID gadget 输出 —— 让**电脑那边零软件、零驱动**。
+
+    这是"伪装成鼠标"这件事唯一真正有意义的位置：不是在 Windows 里假装，
+    而是在**电脑外面的小盒子**（树莓派 Zero 等）上装成一个 USB 鼠标。
+
+    为什么这条路值得单独做一个后端，而不是继续用 SendInput：
+
+      1. **游戏里的原始输入（raw input）**。SendInput 是"合成事件"，
+         部分游戏（尤其是竞技类）会忽略它、或者把它当作异常；而 USB HID 是**真设备**，
+         所有游戏和反作弊都当普通鼠标看，没有任何灰色地带。
+      2. **Windows 端零安装**：插上就多一个鼠标，不用装 Python、不用授权、不用驱动。
+
+    代价：需要一块能跑 Linux 的板子（树莓派 Zero 2 W 约 ¥100）+ 一条 USB 线。
+    接线与配置见 docs/usb-hid-bridge.md。
+
+    设备节点是内核给的字符设备，写进去的就是原始 HID 报文（boot 协议 4 字节：
+    按键 / dx / dy / 滚轮，后三个是有符号 int8）。因此单帧位移最大 ±127 ——
+    更大的位移必须拆成多帧，否则会溢出成反向的巨大位移（这是这类实现最经典的 bug）。
+    """
+
+    name = "linux/USB-HID-gadget"
+
+    def __init__(self, path: str = "/dev/hidg0") -> None:
+        self.path = path
+        self.fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        self.reports = 0
+        self.px = 0.0
+        self.py = 0.0
+
+    def _report(self, buttons: int, dx: int, dy: int, wheel: int) -> None:
+        dx = max(-127, min(127, int(dx)))
+        dy = max(-127, min(127, int(dy)))
+        wheel = max(-127, min(127, int(wheel)))
+        # & 0xFF：把负数写成 int8 的补码形式，这正是 HID 报文要的
+        os.write(self.fd, bytes([buttons, dx & 0xFF, dy & 0xFF, wheel & 0xFF]))
+        self.reports += 1
+        self.px += dx
+        self.py += dy
+
+    def move_relative(self, dx: float, dy: float) -> None:
+        # 拆帧：单帧上限 ±127
+        while abs(dx) >= 1 or abs(dy) >= 1:
+            sx = max(-127, min(127, int(dx)))
+            sy = max(-127, min(127, int(dy)))
+            if sx == 0 and sy == 0:
+                break
+            self._report(0, sx, sy, 0)
+            dx -= sx
+            dy -= sy
+
+    def scroll(self, notches: int) -> None:
+        while notches:
+            step = max(-127, min(127, notches))
+            self._report(0, 0, 0, step)
+            notches -= step
+
+    def stats(self) -> dict:
+        return {"hidg_reports": self.reports,
+                "hidg_moved": [round(self.px, 1), round(self.py, 1)]}
+
+    def close(self) -> None:
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
 class DryRunMouse(MouseBackend):
     """不碰鼠标，只统计"本来会移动多少"。用于调试和自动化测试。"""
 
@@ -789,13 +862,34 @@ class DryRunMouse(MouseBackend):
     def position(self) -> Optional[tuple[float, float]]:
         return (self._pos[0], self._pos[1])
 
+    def stats(self) -> dict:
+        return {
+            "dry_moved": [round(self.dx, 1), round(self.dy, 1)],
+            "dry_moves": self.moves,
+            "dry_scrolls": self.scrolls,
+            "dry_keys": self.keys[-6:],
+        }
+
     def screen_union(self) -> Optional[tuple[float, float, float, float]]:
         return (0.0, 0.0, 1920.0, 1080.0)
 
 
-def make_mouse(output: str) -> MouseBackend:
+def make_mouse(output: str, hidg_device: str = "/dev/hidg0") -> MouseBackend:
     if output == "dry":
         return DryRunMouse()
+    if output == "hidg":
+        if SYSTEM != "Linux":
+            print(f"⚠️  USB HID gadget 只能在 Linux 上做（当前是 {SYSTEM}）——\n"
+                  "    那个「伪装成鼠标」的小盒子必须是树莓派一类的 Linux 板子。\n"
+                  "    退回 dry-run。", file=sys.stderr)
+            return DryRunMouse()
+        try:
+            return HidgMouse(hidg_device)
+        except OSError as e:
+            print(f"⚠️  打不开 HID gadget 设备 {hidg_device}（{e.strerror}）。\n"
+                  "    先按 docs/usb-hid-bridge.md 配好 libcomposite。退回 dry-run。",
+                  file=sys.stderr)
+            return DryRunMouse()
     try:
         if SYSTEM == "Darwin":
             return DarwinMouse()
@@ -2032,11 +2126,7 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
                 "roll": round(pose.roll, 2),
             }
             rec["keys_fired"] = mapper.keys_fired
-            if isinstance(mouse, DryRunMouse):
-                rec["dry_moved"] = [round(mouse.dx, 1), round(mouse.dy, 1)]
-                rec["dry_moves"] = mouse.moves
-                rec["dry_scrolls"] = mouse.scrolls
-                rec["dry_keys"] = mouse.keys[-6:]  # 只留最近几条，够断言即可
+            rec.update(mouse.stats())   # 各后端自己的统计（dry-run / HID gadget）
             print(json.dumps(rec, ensure_ascii=False), flush=True)
             stats_frames = f_total
             stats_t = now
@@ -2166,6 +2256,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--udp-port", type=int, help="姿态 UDP 端口（默认 8420）")
     ap.add_argument("--web-port", type=int, help="手机页面 HTTPS 端口（默认 8443）")
     ap.add_argument("--http-port", type=int, help="纯 HTTP 摄取端口（默认 8421，app/脚本用）")
+    ap.add_argument("--output", choices=["auto", "dry", "hidg"],
+                    help="输出后端：auto(本机注入) | dry(不动) | hidg(Linux USB HID gadget)")
+    ap.add_argument("--hidg-device", help="HID gadget 设备节点（默认 /dev/hidg0）")
     ap.add_argument("--no-imu-fusion", action="store_true",
                     help="关闭加速度计+陀螺仪互补滤波（只用显式姿态角/四元数）")
     ap.add_argument("--format", dest="fmt", choices=["auto", "listenlook", "freepie"],
@@ -2212,7 +2305,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(asdict(cfg), indent=2, ensure_ascii=False))
         return 0
 
-    mouse = make_mouse(cfg.output)
+    mouse = make_mouse(cfg.output, cfg.hidg_device)
 
     if args.self_test:
         return self_test(cfg, mouse)
