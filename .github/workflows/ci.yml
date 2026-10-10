@@ -107,7 +107,10 @@ jobs:
           script -q /dev/null ./Out/airpods.app/Contents/MacOS/airpods --demo --seconds 2 > panel.txt 2>&1 || true
           grep -q "ListenLook" panel.txt || { echo "::error::面板没有标题"; cat panel.txt; exit 1; }
           grep -q "yaw"       panel.txt || { echo "::error::面板没有 yaw 轴"; cat panel.txt; exit 1; }
-          grep -q "█"         panel.txt || { echo "::error::面板没有条形图（退化成一行日志了）"; cat panel.txt; exit 1; }
+          # 采集端的条形图用 # 画、- 作底、| 作中心刻度（接收端用的是 █，两者不同，
+          # 第一版断言就是抄错了字符才挂的 —— 所以这里连底和刻度一起断言）。
+          grep -q "#"         panel.txt || { echo "::error::面板没有条形图填充（退化成一行日志了）"; cat panel.txt; exit 1; }
+          grep -q "|"         panel.txt || { echo "::error::面板没有中心刻度"; cat panel.txt; exit 1; }
           echo "✅ 面板渲染正常"
           head -12 panel.txt
 
