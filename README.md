@@ -49,6 +49,34 @@ AirPods，不需要额外硬件，不需要改装。
 
 ---
 
+## 验证状态（哪些验过、哪些没验过）
+
+这张表的用途是让你知道**哪些结论可以直接信，哪些还得自己试**。
+
+| 部分 | 状态 | 证据 |
+|---|---|---|
+| 解析器 + IMU 互补滤波 | ✅ 18 项 | `tests/test_extract.py` |
+| 手势 → 按键（默认关闭） | ✅ 26 项 | `tests/test_gestures.py` |
+| 接收端管线：UDP / FreePIE / **掉线即停手** / 滚轮 / 坏帧隔离 | ✅ 12 项 | `tests/test_pipeline.py` |
+| 面板渲染（含 PTY 下真跑） | ✅ 22 项 | `tests/test_panel.py` + CI 的 PTY 断言 |
+| 打包后的路径逻辑与兜底证书 | ✅ 6 项 | `tests/test_frozen.py` |
+| USB HID gadget 报文编码（含 ±127 拆帧） | ✅ 22 项 | `tests/test_hidg.py` |
+| **macOS 真机全链路** | ✅ 真机实测 | AirPods Pro 2，40–45 Hz，光标路径 2449px 由头部驱动 |
+| **Windows 鼠标注入** | ✅ CI 真机实测 | windows-latest 上真实注入 + 读回光标位置比对 |
+| **Windows 单文件 exe** | ✅ CI 产出 | 启动、收姿态、跑映射三条冒烟测试 |
+| Windows 指针缩放比例 | ✅ 实测 1.41 | 同一次自检测出，不是猜的 |
+| Linux `uinput` 注入 | ⚠️ **未在真机验证** | 代码与权限检查已写；CI 只探测 `/dev/uinput` 是否存在 |
+| 树莓派 USB HID 桥 | ⚠️ **未在真机验证** | 报文编码已测，缺一块树莓派 |
+| Linux/Windows 上的全局热键 | ⚠️ 未实现 | 现在是按住某个键轮询（见路线图） |
+
+CI 在 **ubuntu / macos / windows** 三个系统上真跑这些测试 —— 这不是形式主义：
+它已经抓出五个"只在本机之外才会出现"的问题（Windows 管道不能用 `select`、
+Windows 没有 `pty` 模块、`expanduser` 认 `USERPROFILE` 不认 `HOME`、
+`os.O_NONBLOCK` 在 Windows 不存在、以及最隐蔽的一个：**`os.open` 在 Windows 默认文本模式，
+把 HID 报文里的 `0x0A` 翻译成了 `0x0D 0x0A`，4 字节报文变 5 字节全部错位**）。
+
+---
+
 ## 快速开始
 
 ### A. macOS + AirPods（最省事的一条）
