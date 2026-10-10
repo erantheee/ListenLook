@@ -18,6 +18,15 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Windows 上把输出重定向到管道/文件时，Python 用的是**本地代码页**（英文系统 cp1252），
+# 打印中文或 █ 这类字符会直接 UnicodeEncodeError 崩掉 —— CI 里就是这么挂的。
+# 这不是 CI 特有的问题：Windows 用户只要 `--stats > 日志.txt` 就会踩到。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 spec = importlib.util.spec_from_file_location("listenlook", os.path.join(ROOT, "receiver", "listenlook.py"))
 ll = importlib.util.module_from_spec(spec)
 sys.modules["listenlook"] = ll

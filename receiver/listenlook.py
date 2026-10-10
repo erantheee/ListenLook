@@ -1945,7 +1945,15 @@ class Panel:
         if not fresh and "停止输出" not in note and "等数据" not in note:
             note = "已停止输出（等数据）"
 
-        state = "● 在线" if fresh else "○ 掉线"
+        if not fresh:
+            state = "○ 掉线"
+        elif not pose.ok:
+            # 数据报在进，但里面的 ok=false —— 这是"传感器自己说没数据"
+            # （AirPods 没连 / 运动权限没给 / 采集端被错误地启动）。
+            # 和"一个包都没收到"是两回事，排查方向完全不同，所以必须分开显示。
+            state = "◍ 传感器无数据"
+        else:
+            state = "● 在线"
         gate = "开" if self.active else "关"
         src = pose.src if fresh else "-"
         out = f"[{gate}] {state} src={src:<7} {rate:5.1f}Hz  "
@@ -2041,7 +2049,7 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
             need_recenter = True
             if cfg.activation == "hold":
                 panel.active = False
-            panel.line(pose, False, 0, 0, 0.0, note="已停止输出（等数据）")
+            panel.line(pose, fresh, 0, 0, 0.0, note="已停止输出（等数据）")
             time.sleep(dt_target)
             continue
 
@@ -2126,7 +2134,22 @@ def self_test(cfg: Config, mouse: MouseBackend) -> int:
     return 2
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 切成 UTF-8。
+
+    Windows 上重定向输出时 Python 用本地代码页（英文系统是 cp1252），
+    面板里的中文和 █ 会直接 UnicodeEncodeError 崩掉。errors="replace" 保证
+    即使终端真的显示不了某个字符，也只是显示成 ?，而不是整个程序挂掉。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(
         prog="listenlook",
         description="ListenLook —— 把头部姿态变成鼠标（跨平台接收端）",

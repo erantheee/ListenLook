@@ -27,9 +27,17 @@ AirPods 继续连着 Windows 电脑放游戏声音 —— 它在这条路线里�
 
 **怎么做**：
 
-```bash
-# 在 Windows 上（用 Python 跑接收端）
-python3 receiver/listenlook.py --bind 0.0.0.0
+```powershell
+# 在 Windows 上。两种方式二选一：
+
+# ① 不想装 Python：直接下载 CI 打包好的单文件 exe（推荐）
+#    https://github.com/erantheee/ListenLook/actions/workflows/ci.yml
+#    最新一次成功的 run → Artifacts → ListenLook-windows-exe
+#    或者看 Releases 页（打了 tag 的版本会附上去）
+.\ListenLook.exe --bind 0.0.0.0
+
+# ② 已经装了 Python：
+python receiver/listenlook.py --bind 0.0.0.0
 ```
 
 然后二选一：

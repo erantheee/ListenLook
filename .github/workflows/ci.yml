@@ -16,6 +16,11 @@ on:
 permissions:
   contents: write # 打 tag 时要往 Release 传附件
 
+env:
+  # 程序内部已经会把 stdio 重配成 UTF-8（Windows 代码页问题），这里再兜一层：
+  # 测试会用子进程拉起接收端，环境变量能覆盖到那些子进程。
+  PYTHONIOENCODING: utf-8
+
 jobs:
   test:
     name: 测试 · ${{ matrix.os }}

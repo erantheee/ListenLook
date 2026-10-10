@@ -1,5 +1,7 @@
 # ListenLook
 
+[![CI](https://github.com/erantheee/ListenLook/actions/workflows/ci.yml/badge.svg)](https://github.com/erantheee/ListenLook/actions/workflows/ci.yml)
+
 **用头部姿态控制鼠标 —— 拿 AirPods 当传感器，用来打游戏。**
 
 ListenLook 把"头部朝向"变成一个鼠标。转头 → 光标移动；歪头 → 滚轮。戴着你本来就在戴的
@@ -59,16 +61,25 @@ cd macapp
 open -n Out/airpods.app        # 或直接在访达里双击 Out/airpods.app，然后点「允许」
 pkill -f "MacOS/airpods"       # 授权完成后先关掉它
 
-# 之后就可以正常在终端里跑：
-./run.sh &                     # 采集端：AirPods 姿态 → UDP
-python3 ../receiver/listenlook.py   # 接收端：UDP → 鼠标
+# 日常也这样启动采集端（它没有界面，启动后就在后台跑）：
+open -n Out/airpods.app
+
+# 接收端可以从终端跑（它只需要辅助功能权限）：
+python3 ../receiver/listenlook.py
 ```
 
-**为什么第一次不能直接在终端里跑**：macOS 把权限算在**责任进程**头上。
-在终端/IDE 里 exec 这个二进制时，责任进程是那个宿主，而宿主没有
-`NSMotionUsageDescription`，于是权限请求不是"被拒"而是**违反隐私策略直接 abort**。
-双击 `Out/airpods.app` 时本程序自己是责任进程，弹窗才会正常出现。
-详见 [macapp/README.md](macapp/README.md)。
+**⚠️ 采集端不要用 `./run.sh` 采集数据** —— 实测结论，和直觉相反：
+
+macOS 把权限算在**责任进程**头上。双击/`open` 时，采集端**自己**是责任进程，
+它带着 `NSMotionUsageDescription`，权限正常；而在终端里 exec 它时，责任进程变成终端，
+终端没有那条声明，于是状态是 `notDetermined`，程序**拒绝硬闯 CoreMotion**
+（硬闯的结果是被系统静默打死，不是报错），只发 `ok:false` 心跳。
+
+这是设计好的诚实降级：接收端会显示「◍ 传感器无数据」，而不是让你对着一个
+"看起来在跑但一动不动"的工具发呆。`./run.sh` 仍然有用（构建、`--help`、调试）。
+
+**怎么确认它真的在跑**：看接收端面板的 `src=airpods` 是不是「● 在线」。
+采集端没有界面也没有托盘图标，接收端就是它唯一的反馈。
 
 接收端还需要**辅助功能**权限（见下面"权限"一节）；授权前也能跑，但只是降级模式。
 
@@ -182,7 +193,10 @@ sudo modprobe uinput && sudo usermod -aG input $USER   # 重新登录后生效
 
 ```bash
 python3 tests/test_extract.py     # 解析器 + IMU 融合（18 项）
+python3 tests/test_gestures.py    # 手势 → 按键（26 项）
 python3 tests/test_pipeline.py    # 接收端管线：UDP/FreePIE/掉线停手/滚轮/坏帧（12 项）
+python3 tests/test_panel.py       # 面板渲染（22 项）
+python3 tests/test_frozen.py      # 打包后的路径逻辑 + 兜底证书（6 项）
 python3 tests/fake_phone.py --seconds 5   # 冒充手机，压 WebSocket 链路
 python3 receiver/listenlook.py --simulate --dry-run   # 合成姿态，不碰鼠标
 python3 receiver/listenlook.py --self-test            # 验证注入链路（会轻微移动光标后复位）
@@ -207,11 +221,11 @@ tests/                    管线测试、解析器测试、假手机
 
 ## 路线图
 
-- [ ] 手势映射：点头/摇头 → 按键（协议里已留 `conf` 字段）
-- [ ] Windows 单文件 exe（PyInstaller + GitHub Actions，朋友们不用装 Python）
+- [x] Windows 单文件 exe —— CI 产出（GitHub Actions 的 `windows-exe` 任务），不用装 Python
+- [x] 手势映射：点头/摇头 → 按键（**默认关闭**，`gestures` 配了才生效）
 - [ ] 全局热键（Windows `RegisterHotKey` / macOS CGEventTap），现在是按住键轮询
 - [ ] Linux 桥的一键安装脚本（BlueZ 那条路）
-- [ ] 收尾：把 `--activation hold` 的默认键做成可发现（面板提示当前用哪个键）
+- [ ] 把 `--activation hold` 的默认键做成可发现（面板提示当前用哪个键）
 
 ---
 
