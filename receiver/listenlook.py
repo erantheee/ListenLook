@@ -779,7 +779,10 @@ class HidgMouse(MouseBackend):
 
     def __init__(self, path: str = "/dev/hidg0") -> None:
         self.path = path
-        self.fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        # O_NONBLOCK 在 Windows 上**根本不存在**（这个后端本来只跑 Linux，
+        # 但测试会用普通文件冒充设备节点，那样在任何平台都该能跑）。
+        # 这是 CI 在 windows-latest 上抓到的：AttributeError: module 'os' has no attribute 'O_NONBLOCK'
+        self.fd = os.open(path, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
         self.reports = 0
         self.px = 0.0
         self.py = 0.0
