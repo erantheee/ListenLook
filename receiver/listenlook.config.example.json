@@ -1,0 +1,45 @@
+{
+  "_说明": "复制成 listenlook.config.json，用 --config 指定。命令行参数优先级更高。",
+
+  "bind": "127.0.0.1",
+  "udp_port": 8420,
+  "web_port": 8443,
+  "http_port": 8421,
+  "fmt": "auto",
+
+  "_映射_说明": "relative=角度偏移→速度（能停在一个偏角上持续走）；rate=角速度→速度（像鼠标一样甩）；absolute=角度→屏幕绝对位置",
+  "mode": "relative",
+  "rate_hz": 100,
+  "deadzone_deg": 2.0,
+  "gain": 8.0,
+  "curve": 1.5,
+  "max_speed_px_s": 1500.0,
+  "max_step_px": 60.0,
+
+  "_手感_说明": "哪个轴反了就翻哪个；swap_xy 给横着绑手机的人",
+  "invert_yaw": false,
+  "invert_pitch": false,
+  "invert_roll": false,
+  "swap_xy": false,
+
+  "_平滑_说明": "One Euro：静止时压抖动、快速转动时不拖影。抖动大就把 min_cutoff 调小",
+  "smooth": true,
+  "min_cutoff": 1.2,
+  "beta": 0.05,
+  "d_cutoff": 1.0,
+
+  "_滚轮_说明": "歪头滚动；wheel_axis 可选 none/roll/yaw/pitch",
+  "wheel_axis": "none",
+  "wheel_deg_per_notch": 6.0,
+  "invert_wheel": false,
+
+  "_激活_说明": "always=一直生效；hold=按住某个键才生效（f8 / space / caps_lock / right_mouse…）",
+  "activation": "always",
+  "hold_key": "f8",
+
+  "imu_fusion": true,
+  "output": "auto",
+  "panel": true,
+  "stats": 0.0,
+  "auto_recenter_idle_s": 0.0
+}

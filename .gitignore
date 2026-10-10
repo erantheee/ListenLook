@@ -1,0 +1,11 @@
+# 构建产物与本地状态，不入库
+Out/
+.modulecache/
+.test/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 现场生成的自签证书（首次运行自动生成）
+receiver/certs/listenlook.crt
+receiver/certs/listenlook.key
