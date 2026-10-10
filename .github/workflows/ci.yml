@@ -54,6 +54,31 @@ jobs:
       - name: 管线（UDP / FreePIE / 掉线停手 / 滚轮 / 坏帧）
         run: python tests/test_pipeline.py
 
+      - name: Windows SendInput 注入链路自检
+        if: runner.os == 'Windows'
+        run: python receiver/listenlook.py --self-test
+
+      - name: Linux uinput 可用性探测（runner 上不一定有）
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          # uinput 是 Linux 后端的唯一依赖。CI runner 有没有 /dev/uinput 不确定，
+          # 所以这条只做探测并如实报告 —— 探到了就是额外的信心，探不到不代表代码有问题。
+          sudo modprobe uinput 2>/dev/null || true
+          if [ -w /dev/uinput ]; then
+            echo "✅ 本 runner 有可写的 /dev/uinput，Linux 注入后端可在此实测"
+            python3 - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location("ll", "receiver/listenlook.py")
+          m = importlib.util.module_from_spec(spec); sys.modules["ll"] = m; spec.loader.exec_module(m)
+          dev = m.LinuxMouse()
+          dev.move_relative(12, -8)
+          print("✅ uinput 虚拟鼠标已创建并写入位移")
+          PY
+          else
+            echo "⏭  本 runner 没有可写的 /dev/uinput —— Linux 注入后端留待真机验证"
+          fi
+
       - name: 假手机 → WebSocket（合成姿态压一遍真实链路）
         run: |
           python -c "
