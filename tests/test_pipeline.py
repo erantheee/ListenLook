@@ -24,6 +24,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +47,12 @@ class Receiver:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         self.lines: list[dict] = []
+        # 用后台线程读 stdout，而不是 select：**Windows 上 select 只能用于 socket，
+        # 对管道会直接抛错**。读取线程到哪都能跑。
+        self._lock = threading.Lock()
+        self._drained = 0
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
         # 等端口真正开始监听：盲等固定秒数在慢机器上会偶发失败
         deadline = time.time() + 6
         while time.time() < deadline:
@@ -57,23 +64,24 @@ class Receiver:
             except OSError:
                 time.sleep(0.05)
 
-    def drain(self) -> list[dict]:
-        """读走已经产生的统计行（非阻塞）。"""
-        import select
-        out = []
-        while True:
-            r, _, _ = select.select([self.proc.stdout], [], [], 0)
-            if not r:
-                break
-            line = self.proc.stdout.readline()
+    def _read_loop(self) -> None:
+        for line in self.proc.stdout:
+            line = line.strip()
             if not line:
-                break
+                continue
             try:
-                out.append(json.loads(line))
+                obj = json.loads(line)
             except json.JSONDecodeError:
-                pass
-        self.lines.extend(out)
-        return out
+                continue
+            with self._lock:
+                self.lines.append(obj)
+
+    def drain(self) -> list[dict]:
+        """取出自上次调用以来新到的统计行。"""
+        with self._lock:
+            start = self._drained
+            self._drained = len(self.lines)
+            return self.lines[start:]
 
     def wait_line(self, timeout: float = 4.0) -> dict | None:
         deadline = time.time() + timeout

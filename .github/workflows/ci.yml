@@ -1,0 +1,150 @@
+name: CI
+
+# 三个平台都真跑测试，并且**真的产出 Windows 单文件 exe**。
+#
+# 为什么 exe 必须在 CI 里出而不是让用户自己打包：Windows 玩家的现实是
+# "不想为了玩个头部追踪去装 Python"。而 PyInstaller 不能交叉编译 ——
+# 要 Windows 的 exe 就得在 Windows 上打包。这就是 CI 存在的理由。
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # 打 tag 时要往 Release 传附件
+
+jobs:
+  test:
+    name: 测试 · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 解析器 / IMU 融合
+        run: python tests/test_extract.py
+
+      - name: 手势 → 按键
+        run: python tests/test_gestures.py
+
+      - name: 面板渲染（TTY 层在 CI 上能真跑）
+        run: python tests/test_panel.py
+
+      - name: 打包后的路径逻辑
+        run: python tests/test_frozen.py
+
+      - name: 管线（UDP / FreePIE / 掉线停手 / 滚轮 / 坏帧）
+        run: python tests/test_pipeline.py
+
+      - name: 假手机 → WebSocket（合成姿态压一遍真实链路）
+        run: |
+          python -c "
+          import subprocess, sys, time, os
+          p = subprocess.Popen([sys.executable, 'receiver/listenlook.py', '--dry-run', '--quiet',
+                                '--no-web', '--udp-port', '19520', '--stats', '1'],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+          time.sleep(6)
+          p.terminate()
+          print('接收端在 CI 上启动并运行了 6 秒 —— 没有崩溃即为通过')
+          "
+
+  macapp:
+    name: 构建 macOS 采集端
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译 + 打包 + 签名
+        run: cd macapp && ./build.sh
+
+      - name: 核对签名确实绑定了 Info.plist
+        run: |
+          cd macapp
+          # "Info.plist=not bound" 是致命的：TCC 读不到 NSMotionUsageDescription，
+          # 运行时会**静默打死进程**。所以这一步要当成断言，不能只是打印。
+          if codesign -dv Out/airpods.app 2>&1 | grep -q "not bound"; then
+            echo "::error::签名没有绑定 Info.plist，产物会被 TCC 打死"
+            exit 1
+          fi
+          codesign -dv Out/airpods.app 2>&1 | grep -E "Identifier|Signature|Info.plist"
+
+      - name: 冒烟测试（能打印帮助即说明二进制可加载）
+        run: macapp/Out/airpods.app/Contents/MacOS/airpods --help | head -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ListenLook-airpods-macos
+          path: macapp/Out/airpods.app
+          if-no-files-found: error
+
+  windows-exe:
+    name: Windows 单文件 exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 PyInstaller
+        run: pip install pyinstaller
+
+      - name: 打包（把兜底证书一起打进去）
+        shell: pwsh
+        run: |
+          # 兜底证书必须打进包里：Windows 上通常没有 openssl，
+          # 而没有证书就意味着手机浏览器那条路（HTTPS 才能读陀螺仪）直接不可用。
+          pyinstaller --onefile --name ListenLook `
+            --add-data "receiver/certs/dev-fallback.crt;receiver/certs" `
+            --add-data "receiver/certs/dev-fallback.key;receiver/certs" `
+            receiver/listenlook.py
+
+      - name: 冒烟测试（打包后的 exe 至少要能起来并打印配置）
+        run: |
+          dist\ListenLook.exe --print-config
+          dist\ListenLook.exe --version
+
+      - name: 冒烟测试（冻结后能否真的收姿态并跑映射）
+        shell: pwsh
+        run: |
+          $env:HOME = $env:TEMP
+          $p = Start-Process -FilePath "dist\ListenLook.exe" `
+               -ArgumentList "--simulate","--dry-run","--no-web","--quiet","--stats","1" `
+               -RedirectStandardOutput "smoke.jsonl" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 4
+          Stop-Process -Id $p.Id -Force
+          Get-Content smoke.jsonl
+          if (-not (Select-String -Path smoke.jsonl -Pattern "frames_delta" -Quiet)) {
+            Write-Error "冻结后没有产出统计行 —— 打包出来的 exe 不可用"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ListenLook-windows-exe
+          path: dist/ListenLook.exe
+          if-no-files-found: error
+
+      - name: 打 tag 时附到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ListenLook.exe
+          body: |
+            Windows 玩家：直接下载 `ListenLook.exe`，双击即可（不需要装 Python）。
+
+            第一次运行会在用户目录建 `~/.listenlook`：
+              · `ListenLook.exe`                      接收端（姿态 → 鼠标）
+              · 手机浏览器打开终端里提示的 https 地址  手机就能当传感器
+            可用 `ListenLook.exe --help` 看全部参数。

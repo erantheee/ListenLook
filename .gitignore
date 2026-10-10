@@ -9,3 +9,9 @@ __pycache__/
 # 现场生成的自签证书（首次运行自动生成）
 receiver/certs/listenlook.crt
 receiver/certs/listenlook.key
+
+# 本地打包/测试环境（不入库）
+.venv/
+build/
+dist/
+*.spec

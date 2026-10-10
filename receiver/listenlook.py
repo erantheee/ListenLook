@@ -112,6 +112,11 @@ class Config:
     stats: float = 0.0  # >0 时：每 N 秒往 stdout 打一行 JSON 统计（给脚本/CI 用）
     auto_recenter_idle_s: float = 0.0  # >0 时：静止这么久就把当前朝向当新零点
 
+    # 手势 → 按键。默认空（不打任何键）：意外按键比少一个功能糟得多。
+    # 每条形如 {"name":"点头","axis":"pitch","direction":"pos","threshold":12,
+    #          "hold_ms":350,"key":"space","release_ms":60,"hysteresis":0.6}
+    gestures: list = field(default_factory=list)
+
 
 DEFAULTS = Config()
 
@@ -272,8 +277,18 @@ class _MOUSEINPUT(ctypes.Structure):
     ]
 
 
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
 class _INPUTunion(ctypes.Union):
-    _fields_ = [("mi", _MOUSEINPUT)]
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
 
 
 class _WININPUT(ctypes.Structure):
@@ -304,8 +319,16 @@ class MouseBackend:
         """所有显示器合并后的边界 (x, y, w, h)。"""
         return None
 
+    def key_press(self, key: str) -> bool:
+        """按下一个键（按下即松开由调用方分两步做，见 key_release）。
+        返回 False 表示该后端不支持键盘注入 —— 上层会计入失败，不会静默当成功。"""
+        return False
+
+    def key_release(self, key: str) -> bool:
+        return False
+
     def key_down(self, key: str) -> bool:
-        """按键当前是否按下。平台后端按需覆写；不支持的后端返回 False
+        """按键当前是否按下（用于"按住某键才生效"）。平台后端按需覆写；不支持的后端返回 False
         （例如 Linux/uinput 只写不读、dry-run 不碰系统）——
         关键是**不能因为没实现就让 --activation hold 崩掉**。"""
         return False
@@ -376,6 +399,8 @@ class DarwinMouse(MouseBackend):
         self.cg.CGWarpMouseCursorPosition.restype = ctypes.c_int32
         self.cg.CGWarpMouseCursorPosition.argtypes = [CGPoint]
         self.cg.AXIsProcessTrusted.restype = ctypes.c_bool
+        self.cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+        self.cg.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
         self._bounds: Optional[tuple[float, float, float, float]] = None
         self._bounds_t = 0.0
 
@@ -474,6 +499,20 @@ class DarwinMouse(MouseBackend):
         ev = self.cg.CGEventCreateScrollWheelEvent(None, self.kCGScrollEventUnitLine, 1, notches)
         self._post(ev)
 
+    def key_press(self, key: str) -> bool:
+        code = MAC_KEYCODES.get(key)
+        if code is None:
+            return False
+        self._post(self.cg.CGEventCreateKeyboardEvent(None, code, True))
+        return True
+
+    def key_release(self, key: str) -> bool:
+        code = MAC_KEYCODES.get(key)
+        if code is None:
+            return False
+        self._post(self.cg.CGEventCreateKeyboardEvent(None, code, False))
+        return True
+
     def key_down(self, key: str) -> bool:
         code = MAC_KEYCODES.get(key)
         if code is None:
@@ -553,6 +592,28 @@ class WindowsMouse(MouseBackend):
             )
         except Exception:
             return None
+
+    def _send_key(self, vk: int, up: bool) -> None:
+        inp = _WININPUT(
+            type=1,  # INPUT_KEYBOARD
+            u=_INPUTunion(ki=_KEYBDINPUT(vk, 0, 0x0002 if up else 0, 0, None)),
+        )
+        if self.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp)) != 1:
+            self._failed += 1
+
+    def key_press(self, key: str) -> bool:
+        vk = WIN_VK.get(key)
+        if vk is None:
+            return False
+        self._send_key(vk, up=False)
+        return True
+
+    def key_release(self, key: str) -> bool:
+        vk = WIN_VK.get(key)
+        if vk is None:
+            return False
+        self._send_key(vk, up=True)
+        return True
 
     def key_down(self, key: str) -> bool:
         vk = WIN_VK.get(key)
@@ -657,6 +718,22 @@ class LinuxMouse(MouseBackend):
             self._emit(0x02, 0x08, notches)
             self._emit(0x00, 0x00, 0)
 
+    def key_press(self, key: str) -> bool:
+        code = LINUX_KEYCODES.get(key)
+        if code is None or not self.available:
+            return False
+        self._emit(0x01, code, 1)   # EV_KEY down
+        self._emit(0x00, 0x00, 0)   # EV_SYN
+        return True
+
+    def key_release(self, key: str) -> bool:
+        code = LINUX_KEYCODES.get(key)
+        if code is None or not self.available:
+            return False
+        self._emit(0x01, code, 0)
+        self._emit(0x00, 0x00, 0)
+        return True
+
     def key_down(self, key: str) -> bool:
         return False
 
@@ -683,6 +760,9 @@ class DryRunMouse(MouseBackend):
         self.scrolls = 0
         self.moves = 0
         self._pos = [0.0, 0.0]
+        # 按键事件按发生顺序记账（形如 ["down:space", "up:space"]），
+        # 让"手势→按键"这条链路可以完全脱离系统权限来测试
+        self.keys: list[str] = []
 
     def move_relative(self, dx: float, dy: float) -> None:
         self.dx += dx
@@ -697,6 +777,14 @@ class DryRunMouse(MouseBackend):
 
     def scroll(self, notches: int) -> None:
         self.scrolls += notches
+
+    def key_press(self, key: str) -> bool:
+        self.keys.append("down:" + key)
+        return True
+
+    def key_release(self, key: str) -> bool:
+        self.keys.append("up:" + key)
+        return True
 
     def position(self) -> Optional[tuple[float, float]]:
         return (self._pos[0], self._pos[1])
@@ -723,28 +811,42 @@ def make_mouse(output: str) -> MouseBackend:
 
 # 键码表。只列了「当开关用」够用的那些，避免把整个 HID 表搬进来。
 MAC_KEYCODES = {
-    "caps_lock": 57,
-    "tab": 48,
-    "f8": 100,
-    "f9": 101,
-    "f10": 109,
-    "shift": 56,
-    "control": 59,
-    "option": 58,
-    "command": 55,
-    "space": 49,
+    # 字母（macOS 虚拟键码不是 ASCII 顺序，抄错一个键就会"按了别的键"，所以整表钉死）
+    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+    "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+    "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+    # 数字
+    "1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25, "0": 29,
+    # 控制键
+    "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "escape": 53, "esc": 53,
+    "arrows_up": 126, "up": 126, "down": 125, "left": 123, "right": 124,
+    "caps_lock": 57, "shift": 56, "control": 59, "option": 58, "command": 55,
+    # 功能键
+    "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97,
+    "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
 }
+
 WIN_VK = {
-    "caps_lock": 0x14,
-    "tab": 0x09,
-    "f8": 0x77,
-    "f9": 0x78,
-    "f10": 0x79,
-    "shift": 0x10,
-    "control": 0x11,
-    "option": 0x12,
-    "command": 0x5B,
-    "space": 0x20,
+    **{chr(c): c - 32 for c in range(ord("a"), ord("z") + 1)},   # a-z → 0x41-0x5A
+    **{str(d): 0x30 + d for d in range(10)},                     # 0-9 → 0x30-0x39
+    "return": 0x0D, "enter": 0x0D, "tab": 0x09, "space": 0x20,
+    "delete": 0x2E, "escape": 0x1B, "esc": 0x1B,
+    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+    "caps_lock": 0x14, "shift": 0x10, "control": 0x11, "option": 0x12, "command": 0x5B,
+    **{f"f{i}": 0x6F + i for i in range(1, 13)},                 # f1-f12 → 0x70-0x7B
+}
+
+# Linux evdev 键码（KEY_*）。只在 uinput 后端用到。
+LINUX_KEYCODES = {
+    "a": 30, "b": 48, "c": 46, "d": 32, "e": 18, "f": 33, "g": 34, "h": 35, "i": 23,
+    "j": 36, "k": 37, "l": 38, "m": 50, "n": 49, "o": 24, "p": 25, "q": 16, "r": 19,
+    "s": 31, "t": 20, "u": 22, "v": 47, "w": 17, "x": 45, "y": 21, "z": 44,
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10, "0": 11,
+    "return": 28, "enter": 28, "tab": 15, "space": 57, "delete": 111, "escape": 1, "esc": 1,
+    "left": 105, "up": 103, "right": 106, "down": 108,
+    "caps_lock": 58, "shift": 42, "control": 29, "option": 56, "command": 125,
+    **{f"f{i}": 58 + i for i in range(1, 11)},                   # f1-f10 → 59-68
+    "f11": 87, "f12": 88,
 }
 
 
@@ -789,6 +891,13 @@ class Mapper:
         self.center_yaw = 0.0
         self.center_pitch = 0.0
 
+        # ── 手势→按键的运行时状态
+        self._t = 0.0                      # 映射器自己的时钟（用累积 dt，便于单测）
+        self._gstate: list[dict] = []      # 每条规则一个状态机
+        self._gfilter: dict[str, OneEuro] = {}
+        self._pending_release: list[tuple[float, str]] = []
+        self.keys_fired = 0
+
     def recenter(self, pose: Pose) -> None:
         self.center_yaw = pose.yaw
         self.center_pitch = pose.pitch
@@ -796,6 +905,12 @@ class Mapper:
         self.fy.reset()
         self.fz.reset()
         self._acc_x = self._acc_y = self._wheel_acc = 0.0
+        # 归零同时重置手势：旧的"越过阈值多久了"在新零点下毫无意义，
+        # 不清掉的话归零瞬间可能立刻误触发一个按键。
+        self._gfilter.clear()
+        for st in self._gstate:
+            st["since"] = None
+            st["armed"] = True
 
     def _axis_value(self, name: str, pose: Pose) -> float:
         v = {"yaw": pose.yaw, "pitch": pose.pitch, "roll": pose.roll}[name]
@@ -805,10 +920,99 @@ class Mapper:
             v = -v
         return v
 
-    def step(self, pose: Pose, dt: float, wheel_only: bool = False) -> tuple[float, float, int]:
+    def _gvalue(self, axis: str, pose: Pose, dt: float) -> float:
+        """手势判定用的角度：与光标映射同一套零点与反向开关，但独立平滑。
+
+        为什么不用 step() 里那两个滤波器：那条链路经过 swap_xy 的通道交换，
+        滤波器里的"x"未必是 yaw。手势是按**轴名**配置的，混用会让人调不明白。
+        """
+        v = self._axis_value(axis, pose)
+        if axis == "yaw":
+            v -= self.center_yaw
+        elif axis == "pitch":
+            v -= self.center_pitch
+        if not self.cfg.smooth:
+            return v
+        f = self._gfilter.get(axis)
+        if f is None:
+            f = OneEuro(self.cfg.min_cutoff, self.cfg.beta, self.cfg.d_cutoff)
+            self._gfilter[axis] = f
+        return f(v, dt)
+
+    def _step_gestures(self, pose: Pose, dt: float) -> list[tuple[str, str]]:
+        """把手势规则推进一帧，返回本帧要注入的按键事件 [("down"|"up", key)]。
+
+        三条设计上的硬要求，少一条这个功能就会很难用：
+
+          1. **按下和松开分成两帧**。游戏普遍按"按下沿"识别一次输入，
+             同一帧里 down+up 会被某些引擎合并掉或整个丢掉。
+          2. **必须有 hysteresis**。"越过 12° 就触发"如果不同时要求"回到 7.2° 以内
+             才重新武装"，玩家把头停在阈值附近时手会抖，那就是每秒几十次连点。
+          3. **hold_ms 是必需的**。只有持续越过阈值超过 hold_ms 才算数 ——
+             否则正常转头看东西的路上就会一路误触。
+        """
+        cfg = self.cfg
+        events: list[tuple[str, str]] = []
+        now = self._t
+
+        # 到期的松开
+        still: list[tuple[float, str]] = []
+        for at, key in self._pending_release:
+            if now >= at:
+                events.append(("up", key))
+            else:
+                still.append((at, key))
+        self._pending_release = still
+
+        if cfg.gestures:
+            if len(self._gstate) != len(cfg.gestures):
+                self._gstate = [{"since": None, "armed": True} for _ in cfg.gestures]
+
+            for i, rule in enumerate(cfg.gestures):
+                if not isinstance(rule, dict):
+                    continue
+                axis = str(rule.get("axis", "")).lower()
+                key = str(rule.get("key", "")).lower()
+                if axis not in ("yaw", "pitch", "roll") or not key:
+                    continue
+                threshold = abs(float(rule.get("threshold", 12.0)))
+                hold = max(0.0, float(rule.get("hold_ms", 350)) / 1000.0)
+                release_after = max(0.0, float(rule.get("release_ms", 60)) / 1000.0)
+                hyst = max(0.0, min(0.99, float(rule.get("hysteresis", 0.6))))
+                positive = str(rule.get("direction", "pos")).lower() != "neg"
+
+                v = self._gvalue(axis, pose, dt)
+                signed = v if positive else -v          # 统一成"越大越接近触发"
+                st = self._gstate[i]
+                low = threshold * hyst                  # 施密特触发器的低阈值
+                mag = abs(v)
+
+                if signed >= threshold:
+                    # 越过高阈值：开始/继续计时
+                    if st["armed"]:
+                        if st["since"] is None:
+                            st["since"] = now
+                        elif now - st["since"] >= hold:
+                            events.append(("down", key))
+                            self._pending_release.append((now + release_after, key))
+                            self.keys_fired += 1
+                            st["armed"] = False
+                            st["since"] = None
+                elif mag <= low:
+                    # 完全退回到低阈值以内 → 清零计时并重新武装。
+                    # 只在**完全退出**时才清零：如果值只是在阈值上下抖（真人点头时
+                    # 头就会这样抖），计时器必须继续走，否则表现为"我点头了但没反应"。
+                    st["since"] = None
+                    st["armed"] = True
+                # 落在低阈值与阈值之间（迟滞带）：保持现状 —— 计时继续，武装状态不变
+        return events
+
+    def step(self, pose: Pose, dt: float, wheel_only: bool = False) -> tuple[float, float, int, list]:
         """返回本帧应该注入的 (dx, dy, wheel_notches)。dx/dy 已含小数累积。"""
         cfg = self.cfg
         dt = max(dt, 1e-4)
+        self._t += dt
+        key_events = self._step_gestures(pose, dt)
 
         ax = "yaw"
         ay = "pitch"
@@ -837,7 +1041,7 @@ class Mapper:
                 self._wheel_acc -= per if self._wheel_acc > 0 else -per
 
         if wheel_only:
-            return 0.0, 0.0, notches
+            return 0.0, 0.0, notches, key_events
 
         # ── 光标速度 / 位置
         if cfg.mode == "absolute":
@@ -846,7 +1050,7 @@ class Mapper:
             # 归一化到 -1..1，再用 gain 当"满屏比例"用（absolute 下 curve 不起作用）
             nx = max(-1.0, min(1.0, sx / half_range))
             ny = max(-1.0, min(1.0, sy / half_range))
-            return nx, ny, notches  # 交由调用方按屏幕尺寸解释
+            return nx, ny, notches, key_events  # 交由调用方按屏幕尺寸解释
 
         if cfg.mode == "rate":
             # 角速度 → 速度
@@ -890,7 +1094,7 @@ class Mapper:
         ix, iy = math.trunc(self._acc_x), math.trunc(self._acc_y)
         self._acc_x -= ix
         self._acc_y -= iy
-        return float(ix), float(iy), notches
+        return float(ix), float(iy), notches, key_events
 
     def maybe_auto_recenter(self, pose: Pose, dt: float) -> None:
         cfg = self.cfg
@@ -1610,6 +1814,39 @@ def serve_phone(cfg: Config, state: PoseState, certfile: str, keyfile: str) -> T
     return httpd
 
 
+def app_dir() -> str:
+    """放证书这类"要长期留着"的文件的目录。
+
+    PyInstaller 打成单文件后 `__file__` 指向一个**临时解包目录**，
+    每次运行都可能被清掉 —— 证书生成在那儿等于每次启动都要重新生成、手机上每次都要重新点警告。
+    所以冻结运行时改用用户目录。
+    """
+    if getattr(sys, "frozen", False):
+        d = os.path.join(os.path.expanduser("~"), ".listenlook")
+        os.makedirs(d, exist_ok=True)
+        return d
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def bundled_dir() -> str:
+    """随程序分发的只读资源所在目录（PyInstaller 解包目录，或源码目录）。"""
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+def _find_fallback_cert() -> Optional[tuple[str, str]]:
+    """找随程序分发的一次性兜底证书。三种布局都试，因为打包方式会变。"""
+    for d in (
+        os.path.join(app_dir(), "certs"),
+        os.path.join(bundled_dir(), "certs"),
+        os.path.join(bundled_dir(), "receiver", "certs"),
+    ):
+        crt = os.path.join(d, "dev-fallback.crt")
+        key = os.path.join(d, "dev-fallback.key")
+        if os.path.exists(crt) and os.path.exists(key):
+            return crt, key
+    return None
+
+
 def ensure_cert(certdir: str, lan_ip: str) -> tuple[str, str]:
     """手机浏览器要用陀螺仪，页面必须是安全上下文（HTTPS）。
 
@@ -1640,15 +1877,14 @@ def ensure_cert(certdir: str, lan_ip: str) -> tuple[str, str]:
         # Windows 上通常没有 openssl。这时不能直接放弃 —— 手机浏览器那条路要靠 HTTPS，
         # 而"装个手机 app 往 HTTP 端口推数据"那条更稳的路不受影响。
         # 所以退回随仓库分发的一次性自签证书（私钥是公开的，只为了让浏览器认它是安全上下文）。
-        fallback_crt = os.path.join(certdir, "dev-fallback.crt")
-        fallback_key = os.path.join(certdir, "dev-fallback.key")
-        if os.path.exists(fallback_crt) and os.path.exists(fallback_key):
+        found = _find_fallback_cert()
+        if found:
             print(
-                f"ℹ️  没有 openssl（{type(e).__name__}），改用仓库自带的兜底证书。\n"
+                f"ℹ️  没有 openssl（{type(e).__name__}），改用随程序分发的兜底证书。\n"
                 "    手机浏览器会多一条「名称不匹配」警告，点继续访问即可。",
                 file=sys.stderr,
             )
-            return fallback_crt, fallback_key
+            return found
         raise SystemExit(
             f"⚠️  生成自签证书失败（{e}），且找不到兜底证书 dev-fallback.crt。\n"
             "    手机浏览器要求 HTTPS 才能读陀螺仪。请安装 openssl 后重试，\n"
@@ -1704,6 +1940,11 @@ class Panel:
                     cells[width // 2 - 1 - i] = "█"
             return "".join(cells)
 
+        # 停手提示由面板自己兜底：调用方忘了传 note 时，绝不能出现
+        # "数字停住了但面板看起来一切正常" —— 那会让人以为工具在跑却没反应。
+        if not fresh and "停止输出" not in note and "等数据" not in note:
+            note = "已停止输出（等数据）"
+
         state = "● 在线" if fresh else "○ 掉线"
         gate = "开" if self.active else "关"
         src = pose.src if fresh else "-"
@@ -1743,6 +1984,7 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
     rate = 0.0
     held = False
     recentered = False
+    warned_keys: set[str] = set()
     need_recenter = False  # 掉线恢复 / 换了来源 → 必须重新取零点
     last_src = None
 
@@ -1781,10 +2023,12 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
                 "pitch": round(pose.pitch, 2),
                 "roll": round(pose.roll, 2),
             }
+            rec["keys_fired"] = mapper.keys_fired
             if isinstance(mouse, DryRunMouse):
                 rec["dry_moved"] = [round(mouse.dx, 1), round(mouse.dy, 1)]
                 rec["dry_moves"] = mouse.moves
                 rec["dry_scrolls"] = mouse.scrolls
+                rec["dry_keys"] = mouse.keys[-6:]  # 只留最近几条，够断言即可
             print(json.dumps(rec, ensure_ascii=False), flush=True)
             stats_frames = f_total
             stats_t = now
@@ -1819,7 +2063,16 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
             held = True
 
         mapper.maybe_auto_recenter(pose, dt)
-        dx, dy, notches = mapper.step(pose, dt, wheel_only=not held)
+        dx, dy, notches, key_events = mapper.step(pose, dt, wheel_only=not held)
+
+        # 手势按键。不支持的键名/后端会返回 False —— 必须报出来，
+        # 否则用户只会看到"配了手势但游戏里没反应"，无从查起。
+        for action, key in key_events:
+            okkey = mouse.key_press(key) if action == "down" else mouse.key_release(key)
+            if not okkey and key not in warned_keys:
+                warned_keys.add(key)
+                print(f"⚠️  按键 '{key}' 无法注入（键名不受支持，或该后端不支持键盘）",
+                      file=sys.stderr)
 
         if held:
             if cfg.mode == "absolute":
@@ -1968,8 +2221,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"      POST http://{ip}:{cfg.http_port}/pose   ← 手机 app、curl、自制硬件", file=sys.stderr)
         print(f"      GET  http://{ip}:{cfg.http_port}/pose.json  （看当前姿态，调试用）", file=sys.stderr)
         try:
-            cert, key = ensure_cert(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs"), ip)
+            cert, key = ensure_cert(os.path.join(app_dir(), "certs"), ip)
             httpd = serve_phone(cfg, state, cert, key)
             print(f"📱 手机浏览器页面（需 HTTPS）：https://{ip}:{cfg.web_port}/", file=sys.stderr)
             print("   （自签证书会提示不安全，选「继续访问」；若浏览器拒绝读陀螺仪，"
