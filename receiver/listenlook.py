@@ -108,6 +108,9 @@ class Config:
 
     # 其它
     output: str = "auto"  # auto | dry | hidg（hidg = Linux USB HID gadget，PC 端零软件）
+    # 注入比例补偿。Windows 会把相对鼠标位移按"指针速度/提高指针精确度"再缩放一次，
+    # 所以同一份 gain 在不同机器上手感不同。用 --self-test 测出实际比例填这里。
+    mouse_scale: float = 1.0
     hidg_device: str = "/dev/hidg0"
     panel: bool = True
     stats: float = 0.0  # >0 时：每 N 秒往 stdout 打一行 JSON 统计（给脚本/CI 用）
@@ -2187,6 +2190,10 @@ def run(cfg: Config, mouse: MouseBackend, state: PoseState, stop: threading.Even
                 mouse.move_absolute(b[0] + (dx + 1) * 0.5 * b[2], b[1] + (dy + 1) * 0.5 * b[3])
                 dx = dy = 0.0
             elif dx or dy:
+                if cfg.mouse_scale and cfg.mouse_scale != 1.0:
+                    # 除以实测比例：把"我们希望移动多少"换算成"该往系统里注入多少"
+                    dx /= cfg.mouse_scale
+                    dy /= cfg.mouse_scale
                 mouse.move_relative(dx, dy)
         if notches:
             mouse.scroll(notches)
@@ -2224,12 +2231,31 @@ def self_test(cfg: Config, mouse: MouseBackend) -> int:
     if mid is None:
         return 2
     got = (mid[0] - start[0], mid[1] - start[1])
-    print(f"观测到位移：({got[0]:+.1f},{got[1]:+.1f})  期望 (+40.0,-25.0)")
-    if abs(got[0] - 40) <= 3 and abs(got[1] + 25) <= 3:
-        print("✅ 注入链路正常")
-        return 0
-    print("❌ 位移与期望不符 —— 大概率是权限问题（macOS 辅助功能 / Linux uinput）")
-    return 2
+    print(f"观测到位移：({got[0]:+.1f},{got[1]:+.1f})    请求： (+40.0,-25.0)")
+
+    # 方向必须对 —— 方向反了说明坐标约定错了，那是真故障
+    if got[0] <= 1 or got[1] >= -1:
+        print("❌ 光标没有朝请求的方向移动 —— 注入被丢弃或坐标约定错误")
+        print("   macOS：检查「辅助功能」权限（缺权限时注入会被**静默丢弃**）")
+        print("   Linux：检查 /dev/uinput 权限")
+        return 2
+
+    # 幅度可能被系统缩放，这是**正常的**，不是故障：
+    # Windows 会把相对位移按"指针速度 + 提高指针精确度"再处理一次。
+    # 所以这里测出实际比例并给出建议值，而不是拿绝对像素数当断言 ——
+    # 后者会让 CI 在一个完全正常的 Windows 上失败（实测就是这样抓到的）。
+    ratios = [g / r for g, r in ((got[0], 40.0), (got[1], -25.0)) if abs(r) > 1e-6]
+    scale = sum(ratios) / len(ratios) if ratios else 1.0
+    print(f"实际注入比例：{scale:.3f}（1.0 = 系统未缩放；Windows 开了指针加速通常 >1）")
+    if abs(scale - 1.0) > 0.08:
+        print(f"ℹ️  系统对位移做了缩放。要让配置里的 gain 与实际手感一致，请加：")
+        print(f"       --mouse-scale {scale:.2f}")
+        print("    （Windows 上这是「设置 > 蓝牙和设备 > 鼠标 > 提高指针精确度」造成的；")
+        print("      关掉它手感会更线性，但会改变你平时的鼠标手感，所以建议用上面的补偿值。）")
+    if abs(got[0]) < 8 and abs(got[1]) < 8:
+        print("⚠️  位移过小，可能只移动了几个像素 —— 建议重跑确认")
+    print("✅ 注入链路正常（方向正确、位移已被系统接收）")
+    return 0
 
 
 def _force_utf8_stdio() -> None:
@@ -2267,6 +2293,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--output", choices=["auto", "dry", "hidg"],
                     help="输出后端：auto(本机注入) | dry(不动) | hidg(Linux USB HID gadget)")
     ap.add_argument("--hidg-device", help="HID gadget 设备节点（默认 /dev/hidg0）")
+    ap.add_argument("--mouse-scale", type=float,
+                    help="注入比例补偿（Windows 指针加速会把位移放大/缩小；用 --self-test 测）")
     ap.add_argument("--no-imu-fusion", action="store_true",
                     help="关闭加速度计+陀螺仪互补滤波（只用显式姿态角/四元数）")
     ap.add_argument("--format", dest="fmt", choices=["auto", "listenlook", "freepie"],
